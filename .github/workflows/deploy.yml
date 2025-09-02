@@ -25,23 +25,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Tailwind toolchain
-        run: |
-          npm i -D tailwindcss@3 postcss autoprefixer
-          npx tailwindcss init -p
-
-      - name: Build Tailwind CSS
-        run: |
-          mkdir -p src
-          if [ ! -f src/input.css ]; then
-            cat > src/input.css <<'CSS'
-          @tailwind base;
-          @tailwind components;
-          @tailwind utilities;
-          CSS
-          fi
-          npx tailwindcss -i ./src/input.css -o ./styles.css --minify
-
       - name: Generate config.js from secrets
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
