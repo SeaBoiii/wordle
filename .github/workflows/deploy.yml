@@ -1,0 +1,72 @@
+name: Deploy Word Game to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Tailwind toolchain
+        run: |
+          npm i -D tailwindcss@3 postcss autoprefixer
+          npx tailwindcss init -p
+
+      - name: Build Tailwind CSS
+        run: |
+          mkdir -p src
+          if [ ! -f src/input.css ]; then
+            cat > src/input.css <<'CSS'
+          @tailwind base;
+          @tailwind components;
+          @tailwind utilities;
+          CSS
+          fi
+          npx tailwindcss -i ./src/input.css -o ./styles.css --minify
+
+      - name: Generate config.js from secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          DICTIONARY_URL: ${{ secrets.DICTIONARY_URL }}
+        run: |
+          : "${SUPABASE_URL:?Missing SUPABASE_URL}"
+          : "${SUPABASE_ANON_KEY:?Missing SUPABASE_ANON_KEY}"
+          printf "" > .nojekyll
+          cat > config.js <<EOF
+          window.SUPABASE_URL = "${SUPABASE_URL}";
+          window.SUPABASE_ANON_KEY = "${SUPABASE_ANON_KEY}";
+          if ("${DICTIONARY_URL}") { window.DICTIONARY_URL = "${DICTIONARY_URL}"; }
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
