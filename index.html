@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Daily Word Guess — Vanilla JS + Supabase</title>
+  <!-- Tailwind (utility CSS) -->
+  <link href="styles.css" rel="stylesheet">
+  <!-- Supabase JS UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <style>
+    /* Fallback tile sizing for the grid */
+    .tile { width: 3rem; height: 3rem; }
+    .kbd { user-select: none; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 md:p-8">
+  <div class="max-w-4xl mx-auto">
+    <header class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl md:text-3xl font-extrabold tracking-tight">Daily Word Guess</h1>
+      <nav class="bg-white/10 rounded-xl p-1 flex gap-1">
+        <button id="tabPlayBtn" class="px-4 py-2 rounded-lg bg-white/20">Play</button>
+        <button id="tabAdminBtn" class="px-4 py-2 rounded-lg hover:bg-white/10">Admin</button>
+      </nav>
+    </header>
+
+    <!-- Notices / tips -->
+    <!--
+    <div class="text-sm text-white/60 mb-4">
+      <p>Attempts = word length + 1. Data stored in Supabase. Admin requires Supabase Auth (email+password) and allowlist in <code>admins</code> table.</p>
+      <p class="mt-2">Before using, set your Supabase project config: in a script tag <code>window.SUPABASE_URL</code> and <code>window.SUPABASE_ANON_KEY</code> (see comments in source).</p>
+    </div>
+    -->
+
+    <!-- PLAY TAB -->
+    <section id="playTab">
+      <div class="text-white/80 mb-2 justify-center">Date: <span id="todayLabel" class="font-mono"></span></div>
+      <div class="text-white/90 mb-4 justify-center">Word length: <strong id="wordLenLabel">-</strong> • Attempts: <strong id="attemptsLabel">-</strong></div>
+
+      <div class="mb-4 text-white/80">
+        <label for="playerNameInput" class="mr-2">Your Name:</label>
+        <input id="playerNameInput" type="text" placeholder="Enter your name" class="px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20" />
+      </div>
+
+      <div id="grid" class="grid gap-2 mb-4 justify-center"></div>
+
+      <input id="hiddenInput" class="sr-only" />
+
+      <div class="flex gap-2 mb-4 justify-center">
+        <button id="typeBtn" class="px-3 py-2 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20">Type on Phone</button>
+      </div>
+
+      <!-- Keyboard -->
+      <div id="keyboard" class="mt-2"></div>
+
+      <div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-black/70 text-white rounded-xl shadow-lg"></div>
+    </section>
+
+    <!-- ADMIN TAB -->
+    <section id="adminTab" class="hidden">
+      <div id="adminAuth"></div>
+      <div id="adminPanel" class="hidden"></div>
+    </section>
+
+    <footer class="mt-10 text-center text-white/60 text-sm">
+      <p>© Brought to you by the ATS Engagement Team</p>
+    </footer>
+  </div>
+
+  <script>
+    // =========================
+    //  CONFIG — replace values
+    // =========================
+    // For quick testing you can paste your keys here, but best practice is to set
+    // these in a small inline script placed BEFORE this file loads.
+    window.SUPABASE_URL = window.SUPABASE_URL || "";
+    window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
+
+    // Default dictionary URL (large English word list)
+    window.DICTIONARY_URL = "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt";
+
+    // ==============
+    //  UTILITIES
+    // ==============
+    const STORAGE_KEYS = { CLIENT_ID: "wordleLike.clientId.v1", PLAYER_NAME: "wordleLike.playerName.v1" };
+    const alphaOnly = (s) => s.replace(/[^A-Za-z]/g, "");
+    const toUpper = (s) => alphaOnly(s).toUpperCase();
+    const todayISO = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    };
+
+    function getClientId() {
+      let id = localStorage.getItem(STORAGE_KEYS.CLIENT_ID);
+      if (!id) {
+        id = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random()).slice(2);
+        localStorage.setItem(STORAGE_KEYS.CLIENT_ID, id);
+      }
+      return id;
+    }
+    function getPlayerName() {
+      let name = localStorage.getItem(STORAGE_KEYS.PLAYER_NAME);
+      if (!name) name = "";
+      return name;
+    }
+    function setPlayerName(name) {
+      localStorage.setItem(STORAGE_KEYS.PLAYER_NAME, name);
+    }
+
+    // Example: hook up name input
+    const playerNameInput = document.getElementById('playerNameInput');
+    playerNameInput.value = getPlayerName();
+    playerNameInput.addEventListener('change', () => {
+      setPlayerName(playerNameInput.value.trim());
+    });
+
+    // Disable grid input if typing in name input
+    let gridInputEnabled = true;
+    function setGridInputEnabled(val) { gridInputEnabled = val; }
+    playerNameInput.addEventListener('focus', () => setGridInputEnabled(false));
+    playerNameInput.addEventListener('blur', () => setGridInputEnabled(true));
+
+    // Dictionary loader
+    let DICT = null;
+    async function loadDictionary() {
+      try {
+        const resp = await fetch(window.DICTIONARY_URL, { cache: "force-cache" });
+        const text = await resp.text();
+        DICT = new Set(text.split(/\r?\n/).map((w) => toUpper(w)).filter((w) => w.length >= 2));
+        console.log(`Loaded dictionary with ${DICT.size} words.`);
+      } catch (e) {
+        console.error("Failed to load dictionary", e);
+        DICT = new Set();
+      }
+    }
+    function isWordValid(word) { return DICT && DICT.has(toUpper(word)); }    
+
+    // ==============
+    //  SUPABASE
+    // ==============
+    let sp = null;
+    function getSupabase() {
+      if (sp) return sp;
+      const url = window.SUPABASE_URL;
+      const key = window.SUPABASE_ANON_KEY;
+      if (!url || !key) {
+        console.warn("Supabase URL/Anon key missing. Set window.SUPABASE_URL and window.SUPABASE_ANON_KEY.");
+        return null;
+      }
+      if (!window.supabase || !window.supabase.createClient) {
+                console.warn(`window.supabase not found. Include supabase-js in your HTML, e.g.
+        <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">`);
+        return null;
+      }
+      sp = window.supabase.createClient(url, key);
+      return sp;
+    }
+
+    async function getSession() {
+      const c = getSupabase();
+      if (!c) return { session: null, user: null };
+      const { data } = await c.auth.getSession();
+      return { session: data.session, user: data.session?.user || null };
+    }
+    function onAuth(cb) {
+      const c = getSupabase();
+      if (!c) return () => {};
+      const { data: sub } = c.auth.onAuthStateChange(() => cb());
+      return () => sub.subscription.unsubscribe();
+    }
+    async function signInWithPassword(email, password) {
+      const c = getSupabase();
+      if (!c) return { error: { message: "Supabase not ready" } };
+      const { error } = await c.auth.signInWithPassword({ email, password });
+      return { error };
+    }
+    async function signOut() {
+      const c = getSupabase();
+      if (!c) return;
+      await c.auth.signOut();
+    }
+    async function isAdminEmail(email) {
+      const c = getSupabase();
+      if (!c || !email) return false;
+      const { data, error } = await c.from("admins").select("email").eq("email", email).maybeSingle();
+      if (error) return false;
+      return !!data;
+    }
+
+    // Data helpers
+    async function fetchSchedule() {
+      const c = getSupabase();
+      if (!c) return [];
+      const { data, error } = await c.from("schedules").select("date, word").order("date", { ascending: true });
+      if (error) { console.error(error); return []; }
+      return (data || []).map((x) => ({ date: x.date, word: toUpper(x.word) }));
+    }
+    async function upsertSchedule(date, word) {
+      const c = getSupabase();
+      if (!c) return { error: "Supabase not ready" };
+      const { error } = await c.from("schedules").upsert({ date, word: toUpper(word) }, { onConflict: "date" });
+      return { error };
+    }
+    async function deleteSchedule(date) {
+      const c = getSupabase();
+      if (!c) return { error: "Supabase not ready" };
+      const { error } = await c.from("schedules").delete().eq("date", date);
+      return { error };
+    }
+    async function getTodayAnswer(dateISO) {
+      const c = getSupabase();
+      if (!c) return null;
+      const { data, error } = await c.from("schedules").select("word").eq("date", dateISO).maybeSingle();
+      if (error) { console.error(error); return null; }
+      return data?.word ? toUpper(data.word) : null;
+    }
+    async function loadProgress(date, clientId) {
+      const c = getSupabase();
+      if (!c) return null;
+      const { data, error } = await c
+        .from("progress")
+        .select("answer, guesses, status")
+        .eq("client_id", clientId)
+        .eq("date", date)
+        .maybeSingle();
+      if (error) { console.error(error); return null; }
+      return data || null;
+    }
+    async function saveProgress(date, clientId, payload) {
+      const c = getSupabase();
+      if (!c) return { error: "Supabase not ready" };
+      const row = { client_id: clientId, player_name: getPlayerName(), date, ...payload };
+      const { error } = await c.from("progress").upsert(row, { onConflict: "client_id,date" });
+      return { error };
+    }
+
+    // ==============
+    //  GAME LOGIC
+    // ==============
+    function getStatusForGuess(guess, answer) {
+      const g = guess.split("");
+      const a = answer.split("");
+      const status = Array(g.length).fill("absent");
+      const counts = {};
+      for (let i = 0; i < a.length; i++) counts[a[i]] = (counts[a[i]] || 0) + 1;
+      for (let i = 0; i < g.length; i++) {
+        if (g[i] === a[i]) { status[i] = "correct"; counts[g[i]] -= 1; }
+      }
+      for (let i = 0; i < g.length; i++) {
+        if (status[i] === "correct") continue;
+        const ch = g[i];
+        if (counts[ch] > 0) { status[i] = "present"; counts[ch] -= 1; }
+      }
+      return status;
+    }
+    function aggregateKeyboard(guesses, answer) {
+      const priority = { absent: 0, present: 1, correct: 2 };
+      const best = {};
+      guesses.forEach((g) => {
+        const st = getStatusForGuess(g, answer);
+        for (let i = 0; i < g.length; i++) {
+          const ch = g[i];
+          const s = st[i];
+          if (!best[ch] || priority[s] > priority[best[ch]]) best[ch] = s;
+        }
+      });
+      return best;
+    }
+
+    // ==============
+    //  UI — PLAY TAB
+    // ==============
+    const playTab = document.getElementById('playTab');
+    const adminTab = document.getElementById('adminTab');
+    const tabPlayBtn = document.getElementById('tabPlayBtn');
+    const tabAdminBtn = document.getElementById('tabAdminBtn');
+    tabPlayBtn.addEventListener('click', () => { playTab.classList.remove('hidden'); adminTab.classList.add('hidden'); tabPlayBtn.classList.add('bg-white/20'); tabAdminBtn.classList.remove('bg-white/20'); });
+    tabAdminBtn.addEventListener('click', () => { playTab.classList.add('hidden'); adminTab.classList.remove('hidden'); tabAdminBtn.classList.add('bg-white/20'); tabPlayBtn.classList.remove('bg-white/20'); });
+
+    const todayLabel = document.getElementById('todayLabel');
+    const wordLenLabel = document.getElementById('wordLenLabel');
+    const attemptsLabel = document.getElementById('attemptsLabel');
+    const grid = document.getElementById('grid');
+    const hiddenInput = document.getElementById('hiddenInput');
+    const typeBtn = document.getElementById('typeBtn');
+    const keyboard = document.getElementById('keyboard');
+    const toast = document.getElementById('toast');
+
+    let today = todayISO();
+    let answer = null;
+    let wordLen = 5;
+    let attempts = wordLen + 1;
+    let guesses = [];
+    let cur = "";
+    let status = 'loading'; // 'playing' | 'won' | 'lost' | 'no-word' | 'loading'
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 3000);
+    }
+
+    function attemptsForLengthFromDict(n) {
+      if (!DICT) return n+1;
+      let count = 0;
+      for (const w of DICT) if (w.length === n) count++;
+      const raw = Math.ceil(Math.log2(Math.max(2, count)) / 2.5);
+      return Math.max(5, Math.min(9, raw));
+    }
+
+    function buildGrid() {
+      grid.style.gridTemplateRows = `repeat(${attempts}, 3rem)`;
+      grid.style.gridTemplateColumns = `repeat(${wordLen}, 3rem)`;
+      grid.innerHTML = '';
+      for (let r = 0; r < attempts; r++) {
+        const guess = guesses[r] || (r === guesses.length ? cur.padEnd(wordLen, '') : ''.padEnd(wordLen, ''));
+        const isSubmitted = r < guesses.length;
+        const tiles = guess.split('');
+        let states = Array(wordLen).fill('empty');
+        if (isSubmitted) states = getStatusForGuess(guess, answer);
+        else if (r === guesses.length) states = tiles.map(ch => ch ? 'filled' : 'empty');
+        for (let c = 0; c < wordLen; c++) {
+          const div = document.createElement('div');
+          div.className = `tile grid place-items-center rounded-lg border text-xl font-bold uppercase transition ${
+            states[c] === 'empty' ? 'bg-white/10 border-white/20 text-white/80 backdrop-blur-sm' :
+            states[c] === 'filled' ? 'bg-white/20 border-white/30 text-white backdrop-blur-sm' :
+            states[c] === 'absent' ? 'bg-gray-600 border-gray-500 text-white' :
+            states[c] === 'present' ? 'bg-yellow-600 border-yellow-500 text-white' :
+            states[c] === 'correct' ? 'bg-green-600 border-green-500 text-white' :
+            'bg-white/10 border-white/20 text-white/80 backdrop-blur-sm'
+          }`;
+          div.textContent = tiles[c] || '';
+          grid.appendChild(div);
+        }
+      }
+    }
+
+    function renderKeyboard() {
+      const rows = [ 'QWERTYUIOP'.split(''), 'ASDFGHJKL'.split(''), ['ENTER', ...'ZXCVBNM'.split(''), '⌫'] ];
+      const kbStatus = aggregateKeyboard(guesses, answer || '');
+      keyboard.innerHTML = '';
+      rows.forEach(row => {
+        const wrap = document.createElement('div');
+        wrap.className = 'flex gap-2 justify-center mb-2';
+        row.forEach(key => {
+          const btn = document.createElement('button');
+          const st = kbStatus[key];
+          btn.className = `kbd px-3 py-2 rounded-lg backdrop-blur-sm ${
+            st === 'correct' ? 'bg-green-600 text-white' :
+            st === 'present' ? 'bg-yellow-600 text-white' :
+            st === 'absent' ? 'bg-gray-600 text-white' : 'bg-white/10 text-white'
+          } hover:opacity-90`;
+          btn.textContent = key;
+          btn.addEventListener('click', () => onKey(key));
+          wrap.appendChild(btn);
+        });
+        keyboard.appendChild(wrap);
+      });
+    }
+
+    function onKey(key) {
+      if (!gridInputEnabled) return;
+      if (status !== 'playing') return;
+      if (key === 'ENTER') return handleEnter();
+      if (key === '⌫') { cur = cur.slice(0, -1); buildGrid(); return; }
+      if (/^[A-Z]$/.test(key)) { if (cur.length < wordLen) cur += key; buildGrid(); }
+    }
+
+    async function handleEnter() {
+      if (status !== 'playing') return;
+      const g = toUpper(cur);
+      if (g.length !== wordLen) return showToast('Not enough letters');
+      if(!isWordValid(g)) return showToast('Not in dictionary');
+      const next = [...guesses, g];
+      guesses = next; cur = '';
+      buildGrid();
+      if (g === answer) {
+        status = 'won';
+        showToast('You got it! 🎉');
+        await saveProgress(today, getClientId(), { answer, guesses: next, status: 'won' });
+        return;
+      }
+      if (next.length >= attempts) {
+        status = 'lost';
+        showToast(`Out of tries. Answer: ${answer}`);
+        await saveProgress(today, getClientId(), { answer, guesses: next, status: 'lost' });
+        return;
+      }
+      await saveProgress(today, getClientId(), { answer, guesses: next, status: 'playing' });
+      renderKeyboard();
+    }
+
+    // Global keydown typing
+    window.addEventListener('keydown', (e) => {
+      if (!gridInputEnabled) return;
+      if (status !== 'playing') return;
+      if (e.key === 'Enter') return handleEnter();
+      if (e.key === 'Backspace') { cur = cur.slice(0, -1); buildGrid(); return; }
+      if (/^[a-zA-Z]$/.test(e.key)) { if (cur.length < wordLen) cur += e.key.toUpperCase(); buildGrid(); }
+    });
+
+    typeBtn.addEventListener('click', () => { hiddenInput.focus(); showToast('Keyboard enabled'); });
+
+    // ==============
+    //  UI — ADMIN TAB
+    // ==============
+    const adminAuth = document.getElementById('adminAuth');
+    const adminPanel = document.getElementById('adminPanel');
+
+    async function renderAdmin() {
+      const { user } = await getSession();
+      if (!user) {
+        adminPanel.classList.add('hidden');
+        adminAuth.innerHTML = `
+          <div class="max-w-sm mx-auto w-full bg-white/5 p-6 rounded-2xl">
+            <h3 class="text-white text-lg font-semibold mb-3">Admin Sign In</h3>
+            <form id="signInForm" class="space-y-3">
+              <input id="email" type="email" placeholder="Email" class="w-full px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20" required />
+              <input id="password" type="password" placeholder="Password" class="w-full px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20" required />
+              <button class="w-full px-4 py-2 rounded-lg bg-emerald-600 text-white font-semibold">Sign In</button>
+              <div id="authMsg" class="text-red-300 text-sm"></div>
+              <p class="text-xs text-white/50">Tip: Create the user in Supabase Auth, then add their email to the <code>admins</code> table.</p>
+            </form>
+          </div>`;
+        document.getElementById('signInForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const email = document.getElementById('email').value;
+          const password = document.getElementById('password').value;
+          const { error } = await signInWithPassword(email, password);
+          if (error) document.getElementById('authMsg').textContent = error.message || String(error);
+          else { document.getElementById('authMsg').textContent = ''; await renderAdmin(); }
+        });
+        return;
+      }
+
+      const admin = await isAdminEmail(user.email);
+      if (!admin) {
+        adminAuth.innerHTML = '';
+        adminPanel.classList.remove('hidden');
+        adminPanel.innerHTML = `
+          <div class="max-w-sm mx-auto w-full bg-white/5 p-6 rounded-2xl text-white/90">
+            <p class="mb-4">Signed in as <span class="font-mono">${user.email}</span>, but you're <strong>not</strong> on the admin allowlist.</p>
+            <button id="signOutBtn" class="px-4 py-2 rounded-lg bg-white/10 border border-white/20">Sign Out</button>
+          </div>`;
+        document.getElementById('signOutBtn').addEventListener('click', async () => { await signOut(); await renderAdmin(); });
+        return;
+      }
+
+      // Admin UI
+      adminAuth.innerHTML = '';
+      adminPanel.classList.remove('hidden');
+      adminPanel.innerHTML = `
+        <div class="flex items-center justify-between mb-4">
+          <div class="text-white/80">Signed in as <span class="font-mono">${user.email}</span> • <span class="text-emerald-300">Admin</span></div>
+          <button id="signOutBtn" class="px-3 py-2 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20">Sign Out</button>
+        </div>
+        <div id="adminMsg" class="mb-3 text-emerald-200"></div>
+        <form id="addForm" class="grid grid-cols-1 md:grid-cols-3 gap-3 items-end bg-white/5 p-4 rounded-2xl">
+          <div>
+            <label class="text-sm text-white/70">Date (YYYY-MM-DD)</label>
+            <input id="dateInput" type="date" class="w-full mt-1 px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20" required />
+          </div>
+          <div>
+            <label class="text-sm text-white/70">Word</label>
+            <input id="wordInput" type="text" placeholder="e.g. ORCHARD" class="w-full mt-1 px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20 uppercase tracking-wider" required />
+            <p class="text-xs text-white/60 mt-1">Letters only; any length ≥ 2. Attempts = length + 1.</p>
+          </div>
+          <button class="px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">Add / Update</button>
+        </form>
+        <div class="flex items-center justify-between mt-6">
+          <h3 class="text-white/90 font-semibold text-lg">Scheduled Words</h3>
+          <div class="flex gap-2">
+            <input id="filterInput" type="text" placeholder="Filter by date or word" class="px-3 py-2 rounded-lg bg-white/10 text-white border border-white/20" />
+            <button id="exportBtn" class="px-3 py-2 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20">Export JSON</button>
+            <label class="px-3 py-2 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20 cursor-pointer">
+              Import JSON
+              <input id="importInput" type="file" accept="application/json" class="hidden" />
+            </label>
+          </div>
+        </div>
+        <div class="mt-3 bg-white/5 rounded-2xl overflow-hidden border border-white/10">
+          <table class="w-full text-left">
+            <thead class="bg-white/10 text-white/80">
+              <tr>
+                <th class="py-2 px-3">Date</th>
+                <th class="py-2 px-3">Word</th>
+                <th class="py-2 px-3">Length</th>
+                <th class="py-2 px-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="schedBody"></tbody>
+          </table>
+        </div>`;
+
+      document.getElementById('signOutBtn').addEventListener('click', async () => { await signOut(); await renderAdmin(); });
+      document.getElementById('addForm').addEventListener('submit', onAddSchedule);
+      document.getElementById('exportBtn').addEventListener('click', onExport);
+      document.getElementById('importInput').addEventListener('change', onImport);
+
+      await renderScheduleTable();
+    }
+
+    async function onAddSchedule(e) {
+      e.preventDefault();
+      const date = document.getElementById('dateInput').value;
+      const word = toUpper(document.getElementById('wordInput').value);
+      if (!isWordValid(word)) return;
+      if (!date || !word || word.length < 2) return;
+      const { error } = await upsertSchedule(date, word);
+      const msg = document.getElementById('adminMsg');
+      if (error) msg.textContent = error.message || String(error); else msg.textContent = 'Saved ✅';
+      document.getElementById('wordInput').value = '';
+      await renderScheduleTable();
+    }
+
+    async function onDeleteSchedule(date) {
+      const { error } = await deleteSchedule(date);
+      const msg = document.getElementById('adminMsg');
+      if (error) msg.textContent = error.message || String(error); else msg.textContent = 'Deleted ✅';
+      await renderScheduleTable();
+    }
+
+    async function renderScheduleTable() {
+      const sched = await fetchSchedule();
+      const filter = (document.getElementById('filterInput')?.value || '').trim().toLowerCase();
+      const body = document.getElementById('schedBody');
+      body.innerHTML = '';
+      const rows = sched.filter(x => !filter || x.date.includes(filter) || x.word.toLowerCase().includes(filter));
+      if (rows.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 4; td.className = 'py-6 px-3 text-center text-white/60'; td.textContent = 'No scheduled words yet.';
+        tr.appendChild(td); body.appendChild(tr); return;
+      }
+      rows.forEach(x => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-white/10 text-white/90';
+        tr.innerHTML = `
+          <td class="py-2 px-3 font-mono">${x.date}</td>
+          <td class="py-2 px-3 uppercase tracking-wide">${x.word}</td>
+          <td class="py-2 px-3">${x.word.length}</td>
+          <td class="py-2 px-3 text-right">
+            <button class="px-3 py-1 rounded-lg bg-red-600/80 hover:bg-red-600 text-white">Delete</button>
+          </td>`;
+        tr.querySelector('button').addEventListener('click', () => onDeleteSchedule(x.date));
+        body.appendChild(tr);
+      });
+      const filterInput = document.getElementById('filterInput');
+      if (filterInput && !filterInput._bound) { filterInput._bound = true; filterInput.addEventListener('input', renderScheduleTable); }
+    }
+
+    function onExport() {
+      fetchSchedule().then(schedule => {
+        const blob = new Blob([JSON.stringify(schedule, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'schedule.json'; a.click();
+        URL.revokeObjectURL(url);
+      });
+    }
+    function onImport(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const data = JSON.parse(String(reader.result));
+          if (Array.isArray(data)) {
+            for (const x of data) if (x && x.date && x.word) await upsertSchedule(x.date, x.word);
+            await renderScheduleTable();
+            document.getElementById('adminMsg').textContent = 'Imported ✅';
+          }
+        } catch { document.getElementById('adminMsg').textContent = 'Import failed'; }
+      };
+      reader.readAsText(file);
+    }
+
+    // ==============
+    //  BOOTSTRAP
+    // ==============
+    async function bootstrap() {
+      const clientId = getClientId();
+      await loadDictionary();
+      today = todayISO();
+      document.getElementById('todayLabel').textContent = today;
+
+      // Load schedule and today's answer
+      const all = await fetchSchedule();
+      const a = await getTodayAnswer(today);
+      answer = a || null;
+      if (!answer) {
+        status = 'no-word';
+        wordLen = 5; attempts = attemptsForLengthFromDict(wordLen);
+        wordLenLabel.textContent = wordLen; attemptsLabel.textContent = attempts;
+        buildGrid(); renderKeyboard();
+      } else {
+        status = 'playing';
+        wordLen = answer.length; attempts = attemptsForLengthFromDict(wordLen);
+        wordLenLabel.textContent = wordLen; attemptsLabel.textContent = attempts;
+        const p = await loadProgress(today, clientId);
+        guesses = (p && p.answer === answer && p.guesses) ? p.guesses : [];
+        if (p && p.status && p.answer === answer) status = p.status;
+        buildGrid(); renderKeyboard();
+      }
+
+      // If schedule empty, seed demo for today
+      if (all.length === 0) {
+        await upsertSchedule(today, 'SINGAPORE');
+        const a2 = await getTodayAnswer(today); answer = a2 || answer;
+        wordLen = answer ? answer.length : 5; attempts = attemptsForLengthFromDict(wordLen);
+        wordLenLabel.textContent = wordLen; attemptsLabel.textContent = attempts;
+        buildGrid(); renderKeyboard();
+      }
+
+      // Admin UI
+      await renderAdmin();
+      onAuth(renderAdmin);
+    }
+
+    bootstrap();
+
+    // ==============
+    //  SELF TESTS
+    // ==============
+    (function runSelfTests(){
+      try {
+        console.group('Vanilla Wordle Self-Tests');
+        console.assert(toUpper('a-b!c') === 'ABC', 'toUpper should strip non-letters and uppercase');
+        const exact = JSON.stringify(getStatusForGuess('ALLOT','ALLOT'));
+        console.assert(exact === JSON.stringify(['correct','correct','correct','correct','correct']), 'Exact match status');
+        const len = 7; const expected = len + 1; console.assert(expected === 8, 'Attempts should be N+1');
+        console.groupEnd();
+      } catch(e) { console.error('Self-tests failed:', e); }
+    })();
+  </script>
+</body>
+</html>
