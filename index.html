@@ -111,17 +111,17 @@
     }
 
     // Example: hook up name input
-    const playerNameInput = document.getElementById('playerNameInput');
-    playerNameInput.value = getPlayerName();
-    playerNameInput.addEventListener('change', () => {
-      setPlayerName(playerNameInput.value.trim());
-    });
+    // const playerNameInput = document.getElementById('playerNameInput');
+    // playerNameInput.value = getPlayerName();
+    // playerNameInput.addEventListener('change', () => {
+    //   setPlayerName(playerNameInput.value.trim());
+    // });
 
     // Disable grid input if typing in name input
     let gridInputEnabled = true;
     function setGridInputEnabled(val) { gridInputEnabled = val; }
-    playerNameInput.addEventListener('focus', () => setGridInputEnabled(false));
-    playerNameInput.addEventListener('blur', () => setGridInputEnabled(true));
+    // playerNameInput.addEventListener('focus', () => setGridInputEnabled(false));
+    // playerNameInput.addEventListener('blur', () => setGridInputEnabled(true));
 
     // Dictionary loader
     let DICT = null;
